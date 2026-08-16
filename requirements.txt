@@ -1,0 +1,11 @@
+# 로컬에서 직접 돌릴 때 필요한 것들
+# (코랩에서는 노트북 첫 칸이 알아서 설치합니다)
+
+pymupdf>=1.24        # PDF
+olefile>=0.46        # 한글 .hwp (구버전)
+python-docx>=1.1     # 워드
+python-pptx>=0.6     # 파워포인트
+openpyxl>=3.1        # 엑셀
+beautifulsoup4>=4.12 # HTML
+
+# .hwpx 는 파이썬 표준 라이브러리(zipfile + xml)만으로 처리합니다.

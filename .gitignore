@@ -1,0 +1,37 @@
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 변환 결과 (개인 자료 — 절대 올리지 말 것)
+md/
+_md/
+변환결과/
+09_변환테스트/
+*.pdf
+*.hwp
+*.hwpx
+*.docx
+*.pptx
+*.xlsx
+
+# 개인정보가 들어 있는 산출물 (절대 올리지 말 것)
+_개인정보_보고서.md
+_개인정보.json
+_index.json
+_files.json
+_오류.md
+INDEX.md
+images/
+
+# 편집기 · 운영체제
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 노트북 실행 흔적
+.ipynb_checkpoints/
