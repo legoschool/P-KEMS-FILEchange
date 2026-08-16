@@ -1,6 +1,6 @@
 # 내 기록 → 마크다운 변환기
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/legoschool/P-KEMS-FILEchange/blob/main/PKEMS_%EB%B3%80%ED%99%98%EA%B8%B0.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/legoschool/pkmes-fileconverter/blob/main/PKEMS_%EB%B3%80%ED%99%98%EA%B8%B0.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **블로그·한글·워드·PPT·엑셀·구글문서**에 흩어진 내 기록을,
