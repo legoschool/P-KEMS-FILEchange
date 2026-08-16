@@ -201,7 +201,8 @@ class FolderConverter:
 
             note = ""
             if len(body) < self.s.min_chars:
-                note = "\n> ⚠ 글자를 거의 찾지 못했습니다. 스캔 이미지이거나 그림 위주의 문서일 수 있습니다.\n"
+                note = ("\n> ⚠ 글자를 거의 찾지 못했습니다. 그림 위주이거나 스캔한 문서일 수 "
+                        "있습니다. 이 도구는 글자 인식(OCR)을 하지 않습니다.\n")
                 self.stats["내용거의없음"] += 1
 
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -276,9 +277,20 @@ class FolderConverter:
         if self.errors:
             L = ["# ⚠ 변환하지 못한 파일", "",
                  f"{len(self.errors)}개", "",
-                 "| 파일 | 이유 |", "|------|------|"]
+                 "| 파일 | 이유와 해결 방법 |", "|------|------------------|"]
             for e in self.errors:
                 name = os.path.basename(e["file"]).replace("|", "／")
-                L.append(f"| {name} | {e['error']} |")
+                L.append(f"| {name} | {e['error'].replace('|', '／')} |")
+            L += ["", "---", "",
+                  "### 자주 나오는 경우", "",
+                  "**옛 오피스 형식(`.xls` `.ppt` `.doc`)**",
+                  "해당 프로그램에서 열어 **다른 이름으로 저장** → "
+                  "`.xlsx` `.pptx` `.docx` 로 바꾼 뒤 다시 변환하세요.",
+                  "확장자만 바꿔 쓴 파일도 같은 오류가 납니다.",
+                  "",
+                  "**글자가 없는 PDF**",
+                  "종이를 스캔하거나 사진으로 만든 문서입니다. "
+                  "이 도구는 **글자 인식(OCR)을 하지 않으므로** 변환할 수 없습니다.",
+                  "원본 문서 파일이 있으면 그것을 변환하세요."]
             with io.open(os.path.join(self.out, "_오류.md"), "w", encoding="utf-8") as f:
                 f.write("\n".join(L))

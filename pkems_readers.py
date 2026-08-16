@@ -199,6 +199,22 @@ def read_hwp(path: str) -> ReadResult:
         import olefile
     except ImportError:
         return ReadResult(False, kind="한글", error="olefile 설치 필요 (pip install olefile)")
+    # .hwp 인데 속은 다른 형식인 경우가 있다 (hwpx 를 이름만 바꿨거나, 아주 옛 버전)
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+    except OSError as e:
+        return ReadResult(False, kind="한글", error=f"파일을 열지 못했습니다: {e}")
+
+    if head.startswith(_ZIP_MAGIC):
+        return read_hwpx(path)          # 사실은 hwpx 였다 — 그대로 처리해 준다
+    if not head.startswith(_OLE_MAGIC):
+        return ReadResult(
+            False, kind="한글",
+            error=("한글 5.0 이상 형식이 아닙니다. 아주 옛 한글 문서이거나 파일이 "
+                   "깨졌을 수 있습니다. 한글에서 열어 '다른 이름으로 저장'으로 "
+                   ".hwp 또는 .hwpx 로 다시 저장한 뒤 변환해 주세요."))
+
     try:
         f = olefile.OleFileIO(path)
     except Exception as e:
@@ -387,6 +403,9 @@ def read_hwpx(path: str) -> ReadResult:
 # 워드 (.docx)
 # ─────────────────────────────────────────────────────────────
 def read_docx(path: str) -> ReadResult:
+    bad = _check_ooxml(path, "워드", ".docx")
+    if bad:
+        return bad
     try:
         import docx
     except ImportError:
@@ -413,6 +432,9 @@ def read_docx(path: str) -> ReadResult:
 # 파워포인트 (.pptx)
 # ─────────────────────────────────────────────────────────────
 def read_pptx(path: str) -> ReadResult:
+    bad = _check_ooxml(path, "파워포인트", ".pptx")
+    if bad:
+        return bad
     try:
         from pptx import Presentation
     except ImportError:
@@ -467,6 +489,9 @@ def _rows_to_md(rows: list[list[str]], max_rows: int = 300) -> str:
 
 
 def read_xlsx(path: str) -> ReadResult:
+    bad = _check_ooxml(path, "엑셀", ".xlsx")
+    if bad:
+        return bad
     try:
         import openpyxl
     except ImportError:
@@ -572,8 +597,13 @@ def read_pdf(path: str) -> ReadResult:
         doc.close()
         text = _clean(out)
         if len(text) < 20 and pages > 0:
-            return ReadResult(True, text, "PDF",
-                              {"쪽": pages, "경고": "글자가 거의 없습니다 — 스캔본이면 OCR이 필요합니다"})
+            # 종이를 찍어 만든 PDF 는 글자가 아니라 그림이라 뽑아낼 것이 없다.
+            # 글자 인식(OCR)은 이 도구의 범위를 벗어나므로 분명히 알린다.
+            return ReadResult(
+                False, kind="PDF",
+                error=(f"글자가 없는 PDF 입니다({pages}쪽). 스캔하거나 사진으로 만든 "
+                       f"문서로 보입니다. 이 도구는 글자 인식(OCR)을 하지 않으므로 "
+                       f"변환할 수 없습니다."))
         return ReadResult(True, text, "PDF", {"쪽": pages})
     except Exception as e:
         return ReadResult(False, kind="PDF", error=str(e))
@@ -582,6 +612,51 @@ def read_pdf(path: str) -> ReadResult:
 # ─────────────────────────────────────────────────────────────
 # 구글 문서 바로가기 (.gdoc / .gsheet / .gslides)
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 구형 오피스 (.xls / .ppt / .doc) — 다루지 않고, 어떻게 하면 되는지 알려준다
+# ─────────────────────────────────────────────────────────────
+_OLD_OFFICE = {
+    ".xls": ("엑셀", ".xlsx"),
+    ".ppt": ("파워포인트", ".pptx"),
+    ".doc": ("워드", ".docx"),
+}
+
+
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0"       # 옛 오피스·한글의 CFB 서명
+_ZIP_MAGIC = b"PK"                     # docx·pptx·xlsx·hwpx 는 모두 ZIP
+
+
+def _check_ooxml(path: str, kind: str, newext: str) -> ReadResult | None:
+    """확장자만 새 형식으로 바꿔 놓은 파일을 알아본다.
+    맞으면 None, 아니면 안내가 담긴 ReadResult 를 돌려준다."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError as e:
+        return ReadResult(False, kind=kind, error=f"파일을 열지 못했습니다: {e}")
+    if head.startswith(_ZIP_MAGIC):
+        return None
+    if head.startswith(_OLE_MAGIC):
+        return ReadResult(
+            False, kind=kind,
+            error=(f"이름만 {newext} 이고 실제로는 옛 형식인 파일입니다. "
+                   f"해당 파일을 열어 '다른 이름으로 저장'으로 진짜 {newext} 형식으로 "
+                   f"바꾼 뒤 다시 변환해 주세요."))
+    return ReadResult(False, kind=kind, error=f"{newext} 형식이 아닙니다 (내용이 깨졌을 수 있음)")
+
+
+def read_old_office(path: str) -> ReadResult:
+    """옛 형식은 구조가 완전히 달라 따로 다루지 않는다.
+    해당 프로그램에서 '다른 이름으로 저장'만 하면 되므로 그 방법을 알려준다."""
+    ext = os.path.splitext(path)[1].lower()
+    kind, newext = _OLD_OFFICE.get(ext, ("문서", ".xlsx"))
+    return ReadResult(
+        False, kind=kind,
+        error=(f"옛 {kind} 형식({ext})은 지원하지 않습니다. "
+               f"해당 파일을 열어 '다른 이름으로 저장'으로 {newext} 형식으로 "
+               f"바꾼 뒤 다시 변환해 주세요."))
+
+
 _G_KIND = {".gdoc": "구글문서", ".gsheet": "구글시트", ".gslides": "구글슬라이드"}
 
 
@@ -631,6 +706,10 @@ READERS = {
     ".gdoc": read_gshortcut,
     ".gsheet": read_gshortcut,
     ".gslides": read_gshortcut,
+    # 옛 형식 — 변환하지 않고 '어떻게 바꾸면 되는지' 안내만 남긴다
+    ".xls": read_old_office,
+    ".ppt": read_old_office,
+    ".doc": read_old_office,
 }
 
 SUPPORTED = sorted(READERS)
