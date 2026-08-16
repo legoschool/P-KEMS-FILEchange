@@ -24,11 +24,20 @@ import re
 import json
 import time
 
-# 구글 문서 종류 -> 내보낼 형식
+# 구글 문서 종류 -> 어떤 형식으로 받아올지
+#
+#   문서   : 구글이 마크다운으로 바로 내보내 준다
+#   시트   : csv 로 받으면 '첫 장'만 온다 -> xlsx 로 받아 모든 시트를 표로 옮긴다
+#   슬라이드: txt 로 받으면 발표자 노트가 빠진다 -> pptx 로 받아 노트까지 옮긴다
+#
+# 어떤 경우든 최종 결과는 .md 하나로 통일한다.
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
 EXPORT_AS = {
     "application/vnd.google-apps.document":     ("text/markdown", ".md", "구글문서"),
-    "application/vnd.google-apps.spreadsheet":  ("text/csv", ".csv", "구글시트"),
-    "application/vnd.google-apps.presentation": ("text/plain", ".txt", "구글슬라이드"),
+    "application/vnd.google-apps.spreadsheet":  (XLSX_MIME, ".md", "구글시트"),
+    "application/vnd.google-apps.presentation": (PPTX_MIME, ".md", "구글슬라이드"),
 }
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -112,27 +121,51 @@ class GoogleDocs:
         self.log(f"  일반 파일(별도 변환 필요) : {len(other)}개")
         return google
 
-    # ── 한 개 내보내기
+    # ── 한 개 내보내기 (무엇이든 .md 로 만든다)
     def export_one(self, file_id: str, mime: str, dst_noext: str) -> str | None:
         target, ext, _kind = EXPORT_AS[mime]
+
         try:
             data = self.svc.files().export(fileId=file_id, mimeType=target).execute()
-        except Exception as e:
-            # 마크다운 내보내기를 지원하지 않으면 일반 텍스트로 후퇴
-            if target == "text/markdown":
-                try:
-                    data = self.svc.files().export(fileId=file_id,
-                                                   mimeType="text/plain").execute()
-                    ext = ".md"
-                except Exception as e2:
-                    raise e2
-            else:
-                raise e
+        except Exception:
+            # 요청한 형식을 지원하지 않으면 일반 텍스트로 후퇴
+            data = self.svc.files().export(fileId=file_id,
+                                           mimeType="text/plain").execute()
+            target = "text/plain"
+
+        if not isinstance(data, bytes):
+            data = data.encode("utf-8")
+
         path = dst_noext + ext
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+        if target in (XLSX_MIME, PPTX_MIME):
+            body = self._office_to_md(data, target)
+        else:
+            body = data.decode("utf-8", "ignore")
+
+        with io.open(path, "w", encoding="utf-8") as f:
+            f.write(body)
         return path
+
+    @staticmethod
+    def _office_to_md(data: bytes, target: str) -> str:
+        """xlsx/pptx 원본을 이미 검증된 읽기 모듈로 마크다운으로 옮긴다."""
+        import tempfile
+        from pkems_readers import read_xlsx, read_pptx
+
+        suffix = ".xlsx" if target == XLSX_MIME else ".pptx"
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        try:
+            tmp.write(data)
+            tmp.close()
+            res = read_xlsx(tmp.name) if suffix == ".xlsx" else read_pptx(tmp.name)
+            return res.text if res.ok else f"> 내용을 읽지 못했습니다: {res.error}"
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     # ── 폴더 통째로 내보내기
     def export_folder(self, folder_or_link: str, out_dir: str,
@@ -140,7 +173,8 @@ class GoogleDocs:
         t0 = time.time()
         files = self.list_folder(folder_or_link, recursive)
         if not files:
-            return {"done": 0, "failed": 0}
+            # 키를 빠뜨리면 결과를 받아 쓰는 쪽에서 오류가 난다
+            return {"done": 0, "skipped": 0, "failed": 0}
 
         self.log(f"\n{out_dir} 로 가져옵니다.\n")
         os.makedirs(out_dir, exist_ok=True)
@@ -176,8 +210,6 @@ class GoogleDocs:
 
     # ── 내보낸 파일 앞에 정보 붙이기
     def _add_front_matter(self, path: str, f: dict, kind: str):
-        if not path.endswith(".md"):
-            return                                   # csv/txt 는 건드리지 않는다
         try:
             with io.open(path, encoding="utf-8") as fh:
                 body = fh.read()
