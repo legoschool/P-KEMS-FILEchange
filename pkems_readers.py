@@ -74,7 +74,19 @@ def _clean(paras: list[str]) -> str:
 # ─────────────────────────────────────────────────────────────
 # 한글 (.hwp) — HWP 5.0 바이너리
 # ─────────────────────────────────────────────────────────────
-HWPTAG_PARA_TEXT = 0x10 + 51            # 0x43
+_TAG = 0x10
+HWPTAG_PARA_TEXT = _TAG + 51            # 0x43
+HWPTAG_CTRL_HEADER = _TAG + 55          # 0x47
+HWPTAG_LIST_HEADER = _TAG + 56          # 0x48
+HWPTAG_TABLE = _TAG + 61                # 0x4D
+
+# 표 셀 속성은 LIST_HEADER 의 8번째 바이트부터 시작한다.
+#   0  INT32  문단 수
+#   4  UINT32 속성
+#   8  UINT16 열(col) / 10 행(row) / 12 열병합 / 14 행병합
+_CELL_OFFSET = 8
+_MAX_SIDE = 300        # 한 변이 이보다 크면 표로 보지 않는다
+_MAX_CELLS = 20000     # 칸이 이보다 많으면 표 대신 글로 풀어쓴다
 
 # 문단 텍스트에 섞인 제어문자: 아래 값들은 '자기 + 6워드 + 자기' = 8워드 블록
 _HWP_BLOCK_CTRL = {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15,
@@ -114,6 +126,74 @@ def _hwp_decode_para(payload: bytes) -> str:
     return "".join(buf).strip()
 
 
+class _HwpTable:
+    """표 하나를 모아 두었다가 마크다운 표로 내놓는다."""
+
+    def __init__(self, level: int):
+        self.level = level          # 이 표를 감싼 CTRL_HEADER 의 깊이
+        self.rows = self.cols = 0
+        self.cells: dict[tuple[int, int], list[str]] = {}
+        self.spans: dict[tuple[int, int], tuple[int, int]] = {}
+        self.cur: tuple[int, int] | None = None
+
+    def set_size(self, payload: bytes):
+        if len(payload) >= 8:
+            _, self.rows, self.cols = struct.unpack_from("<IHH", payload, 0)
+
+    def start_cell(self, payload: bytes):
+        """LIST_HEADER 는 표 셀 말고 글상자 등에도 쓰인다.
+        표가 선언한 크기를 벗어나는 값이면 셀이 아니라고 보고 무시한다."""
+        self.cur = None
+        if len(payload) < _CELL_OFFSET + 8:
+            return
+        col, row, cspan, rspan = struct.unpack_from("<HHHH", payload, _CELL_OFFSET)
+        if self.rows and self.cols:
+            if row >= self.rows or col >= self.cols:
+                return                      # 표 밖 -> 셀 아님
+        elif row > _MAX_SIDE or col > _MAX_SIDE:
+            return                          # 크기를 모를 땐 상식선에서 자름
+        self.cur = (row, col)
+        self.cells.setdefault(self.cur, [])
+        self.spans[self.cur] = (max(cspan, 1), max(rspan, 1))
+
+    def add_text(self, text: str) -> bool:
+        if self.cur is None:
+            return False
+        if text.strip():
+            self.cells[self.cur].append(text.strip())
+        return True
+
+    def to_markdown(self) -> str:
+        if not self.cells:
+            return ""
+        maxr = max(r for r, _ in self.cells) + 1
+        maxc = max(c for _, c in self.cells) + 1
+        # 선언 크기가 있으면 그것을 믿되, 실제 셀이 더 많으면 거기까지만 늘린다
+        nrows = min(max(self.rows, maxr), _MAX_SIDE)
+        ncols = min(max(self.cols, maxc), _MAX_SIDE)
+        if nrows < 1 or ncols < 1:
+            return ""
+        if nrows * ncols > _MAX_CELLS:
+            # 표로 그리기엔 너무 크다 -> 내용만 줄줄이 적는다
+            return "\n\n".join(" ".join(v) for v in self.cells.values() if v)
+
+        grid = [["" for _ in range(ncols)] for _ in range(nrows)]
+        for (r, c), parts in self.cells.items():
+            if r < nrows and c < ncols:
+                grid[r][c] = " ".join(parts).replace("|", "／")
+
+        # 내용이 전혀 없는 표는 버린다
+        if not any(any(x for x in row) for row in grid):
+            return ""
+
+        head = grid[0]
+        out = ["| " + " | ".join(head) + " |",
+               "|" + "|".join(["---"] * ncols) + "|"]
+        for row in grid[1:]:
+            out.append("| " + " | ".join(row) + " |")
+        return "\n".join(out)
+
+
 def read_hwp(path: str) -> ReadResult:
     try:
         import olefile
@@ -136,7 +216,17 @@ def read_hwp(path: str) -> ReadResult:
         if not sections:
             return ReadResult(False, kind="한글", error="본문(BodyText)이 없습니다")
 
-        paras = []
+        paras: list[str] = []
+        stack: list[_HwpTable] = []     # 표 안의 표까지 다룬다
+        n_tables = 0
+
+        def close_tables(level: int):
+            """깊이가 얕아지면 그 안에서 열린 표들을 끝낸다."""
+            while stack and level <= stack[-1].level:
+                md = stack.pop().to_markdown()
+                if md:
+                    (stack[-1].add_text(md) if stack else None) or paras.append(md)
+
         for sec in sections:
             data = f.openstream(sec).read()
             if compressed:
@@ -148,6 +238,7 @@ def read_hwp(path: str) -> ReadResult:
             while i < n - 4:
                 (word,) = struct.unpack_from("<I", data, i)
                 tag = word & 0x3FF
+                level = (word >> 10) & 0x3FF
                 size = (word >> 20) & 0xFFF
                 i += 4
                 if size == 0xFFF:
@@ -155,10 +246,25 @@ def read_hwp(path: str) -> ReadResult:
                     i += 4
                 payload = data[i:i + size]
                 i += size
-                if tag == HWPTAG_PARA_TEXT:
-                    paras.append(_hwp_decode_para(payload))
+
+                close_tables(level)
+
+                if tag == HWPTAG_CTRL_HEADER and payload[:4][::-1] == b"tbl ":
+                    stack.append(_HwpTable(level))
+                    n_tables += 1
+                elif tag == HWPTAG_TABLE and stack:
+                    stack[-1].set_size(payload)
+                elif tag == HWPTAG_LIST_HEADER and stack:
+                    stack[-1].start_cell(payload)
+                elif tag == HWPTAG_PARA_TEXT:
+                    text = _hwp_decode_para(payload)
+                    if not (stack and stack[-1].add_text(text)):
+                        paras.append(text)
+
+            close_tables(0)
+
         return ReadResult(True, _clean(paras), "한글",
-                          {"섹션": len(sections), "문단": len(paras)})
+                          {"섹션": len(sections), "문단": len(paras), "표": n_tables})
     except Exception as e:
         return ReadResult(False, kind="한글", error=f"본문 해석 실패: {e}")
     finally:
@@ -175,6 +281,58 @@ def _localname(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _hwpx_cell_text(tc) -> str:
+    """표 셀 안의 글을 모은다 (셀 안의 표까지 포함)."""
+    return " ".join(
+        (t.text or "").strip() for t in tc.iter()
+        if _localname(t.tag) == "t" and (t.text or "").strip()
+    ).strip()
+
+
+def _hwpx_table_md(tbl) -> str:
+    """<hp:tbl> 을 마크다운 표로 옮긴다."""
+    try:
+        nrows = int(tbl.get("rowCnt") or 0)
+        ncols = int(tbl.get("colCnt") or 0)
+    except ValueError:
+        nrows = ncols = 0
+
+    cells: dict[tuple[int, int], str] = {}
+    for tc in tbl.iter():
+        if _localname(tc.tag) != "tc":
+            continue
+        addr = next((a for a in tc if _localname(a.tag) == "cellAddr"), None)
+        if addr is None:
+            continue
+        try:
+            c = int(addr.get("colAddr", 0))
+            r = int(addr.get("rowAddr", 0))
+        except ValueError:
+            continue
+        if r > _MAX_SIDE or c > _MAX_SIDE:
+            continue
+        cells[(r, c)] = _hwpx_cell_text(tc)
+
+    if not cells:
+        return ""
+    nrows = min(max(nrows, max(r for r, _ in cells) + 1), _MAX_SIDE)
+    ncols = min(max(ncols, max(c for _, c in cells) + 1), _MAX_SIDE)
+    if nrows * ncols > _MAX_CELLS:
+        return "\n\n".join(v for v in cells.values() if v)
+    if not any(cells.values()):
+        return ""
+
+    grid = [["" for _ in range(ncols)] for _ in range(nrows)]
+    for (r, c), v in cells.items():
+        if r < nrows and c < ncols:
+            grid[r][c] = v.replace("|", "／")
+    out = ["| " + " | ".join(grid[0]) + " |",
+           "|" + "|".join(["---"] * ncols) + "|"]
+    for row in grid[1:]:
+        out.append("| " + " | ".join(row) + " |")
+    return "\n".join(out)
+
+
 def read_hwpx(path: str) -> ReadResult:
     try:
         z = zipfile.ZipFile(path)
@@ -186,17 +344,39 @@ def read_hwpx(path: str) -> ReadResult:
         if not secs:
             return ReadResult(False, kind="한글", error="section XML을 찾지 못했습니다")
 
-        paras = []
+        paras: list[str] = []
+        n_tables = 0
+
+        def walk(el, buf: list[str]):
+            """문서 순서대로 훑되, 표를 만나면 통째로 옮기고 더 내려가지 않는다."""
+            nonlocal n_tables
+            name = _localname(el.tag)
+            if name == "tbl":
+                if buf:
+                    paras.append(" ".join(buf).strip())
+                    buf.clear()
+                md = _hwpx_table_md(el)
+                if md:
+                    paras.append(md)
+                n_tables += 1
+                return
+            if name == "t" and (el.text or "").strip():
+                buf.append(el.text.strip())
+            for ch in el:
+                walk(ch, buf)
+            if name == "p" and buf:
+                paras.append(" ".join(buf).strip())
+                buf.clear()
+
         for s in secs:
             root = ET.fromstring(z.read(s))
-            for el in root.iter():
-                if _localname(el.tag) != "p":
-                    continue
-                txt = "".join(t.text or "" for t in el.iter()
-                              if _localname(t.tag) == "t")
-                paras.append(txt.strip())
+            leftover: list[str] = []
+            walk(root, leftover)
+            if leftover:
+                paras.append(" ".join(leftover).strip())
+
         return ReadResult(True, _clean(paras), "한글",
-                          {"섹션": len(secs), "문단": len(paras)})
+                          {"섹션": len(secs), "문단": len(paras), "표": n_tables})
     except Exception as e:
         return ReadResult(False, kind="한글", error=f"본문 해석 실패: {e}")
     finally:
